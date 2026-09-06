@@ -1,0 +1,20 @@
+# One line per scheduled job. Tab separated, five columns:
+#
+#   name	schedule	persistent	command	description
+#
+# name         becomes <name>.service and <name>.timer. Letters, digits, - and _.
+# schedule     any OnCalendar expression, or one of minutely/hourly/daily/weekly/
+#              monthly/yearly. Validated against systemd BEFORE anything is written.
+# persistent   yes runs a missed job when the machine comes back. Right for a
+#              nightly backup, wrong for a five-minute poll - which would fire
+#              once on boot for every interval it slept through.
+# command      absolute path, or a program on PATH. Checked for existence and
+#              the executable bit, because a timer pointing at a path that moved
+#              fails once a day in silence.
+# description  what shows up in systemctl status and list-timers.
+
+backup-nightly	*-*-* 02:30:00	yes	/usr/local/sbin/backup.sh	Nightly backup to the external disk
+backup-verify	*-*-15 03:00:00	yes	/usr/local/sbin/backup-verify.sh	Monthly checksum comparison against the source
+restore-drill	*-01,04,07,10-20 03:00:00	yes	/usr/local/sbin/restore-drill.sh	Quarterly: restore the newest dump and check it
+deadman	*:0/5	no	/usr/local/sbin/deadman.sh	Every five minutes: ping the switch, or do not
+smart-check	*-*-* *:30:00	no	/usr/local/sbin/smart-check.sh	Hourly disk health audit

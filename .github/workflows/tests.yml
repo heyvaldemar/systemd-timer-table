@@ -1,0 +1,51 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: ShellCheck
+        # Pinned, and the same image a maintainer runs locally: Ubuntu's
+        # packaged shellcheck is a different version with different defaults.
+        run: |
+          docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.11.0 \
+            install-timers.sh tests/e2e-install-timers.sh
+
+      - name: The shipped example table is valid
+        # A broken example is the first thing anybody copies.
+        run: |
+          sudo mkdir -p /usr/local/sbin
+          # A while-read loop, not `for` over a command substitution: a path
+          # with a space in it would otherwise be split into two paths, and the
+          # check would pass for two files that do not exist.
+          awk -F'\t' '!/^#/ && NF>1 {print $4}' jobs.tsv.example \
+            | awk '{print $1}' \
+            | while IFS= read -r c; do sudo install -m 755 /bin/true "$c"; done
+          TIMER_TABLE=jobs.tsv.example bash install-timers.sh --check
+
+  scenarios:
+    name: Twelve scenarios, mostly refusals
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Run the suite
+        # Each scenario hands the generator a table broken in exactly one way.
+        # A rule that cannot fire is worse here than elsewhere: the whole
+        # argument for this tool is that it refuses to install a schedule that
+        # would never run.
+        run: |
+          chmod +x tests/e2e-install-timers.sh
+          ./tests/e2e-install-timers.sh

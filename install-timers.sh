@@ -1,0 +1,142 @@
+#!/bin/bash
+# install-timers.sh — render every scheduled job on this host from one table.
+#
+# WHY A TABLE AND NOT THIRTY HAND-WRITTEN FILES. A unit and a timer per job is
+# six lines of boilerplate each, and the boilerplate is where they drift: one
+# gets `Persistent=true` and the next does not, one names the script by an
+# absolute path and another relies on $PATH, one was edited last year and
+# nobody remembers why. A table has one column per decision, so the difference
+# between two jobs is visible on one line instead of across four files.
+#
+# WHY NOT CRON. Three things this needs that cron does not give:
+#   * a missed run can be caught up (Persistent), per job, which matters for a
+#     nightly backup and does not for a five-minute poll;
+#   * a job that hangs can be bounded (TimeoutStartSec) instead of running
+#     until someone notices;
+#   * `systemctl list-timers` says when each one last ran and when it runs
+#     next, which is the question you actually have at 3am.
+#
+# WHY IT VALIDATES BEFORE IT WRITES ANYTHING. An OnCalendar expression that
+# does not parse installs perfectly cleanly and then never fires. There is no
+# error, no log line, and no way to tell it apart from a job that simply has
+# not come round yet - you find out when you go looking for the thing it was
+# supposed to have done. So every expression in the table goes through
+# `systemd-analyze calendar` first, and one bad line stops the whole run
+# before a single file is written.
+#
+#   install-timers.sh                 validate the table, then install
+#   install-timers.sh --check         validate only, write nothing
+#   install-timers.sh --list          show what is installed now
+set -uo pipefail
+
+MODE="${1:-}"
+TABLE="${TIMER_TABLE:-/etc/systemd-timer-table/jobs.tsv}"
+UNIT_DIR="${TIMER_UNIT_DIR:-/etc/systemd/system}"
+PREFIX="${TIMER_PREFIX:-}"
+USER_MODE="${TIMER_USER_MODE:-false}"
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+say() { printf '%s\n' "$*"; }
+
+SYSTEMCTL=(systemctl)
+[ "$USER_MODE" = "true" ] && SYSTEMCTL=(systemctl --user)
+
+if [ "$MODE" = "--list" ]; then
+  "${SYSTEMCTL[@]}" list-timers --all --no-pager
+  exit $?
+fi
+
+[ -f "$TABLE" ] || die "no table at $TABLE"
+command -v systemd-analyze >/dev/null 2>&1 || die "systemd-analyze not found; this host cannot validate calendar expressions"
+
+# ---------------------------------------------------------------- read
+# name<TAB>schedule<TAB>persistent<TAB>command<TAB>description
+names=(); scheds=(); persists=(); cmds=(); descs=()
+lineno=0
+while IFS=$'\t' read -r name sched persist cmd desc || [ -n "${name:-}" ]; do
+  lineno=$((lineno+1))
+  case "${name:-}" in ''|'#'*) continue ;; esac
+  [ -n "${sched:-}" ] || die "line $lineno ($name): no schedule"
+  [ -n "${cmd:-}" ]   || die "line $lineno ($name): no command"
+  case "$name" in *[!A-Za-z0-9_-]*) die "line $lineno: '$name' is not a usable unit name" ;; esac
+  case "${persist:-no}" in yes|no) : ;; *) die "line $lineno ($name): persistent must be yes or no, not '$persist'" ;; esac
+  names+=("$name"); scheds+=("$sched"); persists+=("${persist:-no}")
+  cmds+=("$cmd"); descs+=("${desc:-$name}")
+done < "$TABLE"
+
+[ "${#names[@]}" -gt 0 ] || die "$TABLE defines no jobs"
+
+# ------------------------------------------------------- validate everything
+# All of it, before any of it. A run that installs eleven jobs and then dies on
+# the twelfth leaves a host in a state nobody chose.
+problems=0
+for i in "${!names[@]}"; do
+  sched="${scheds[$i]}"
+  if [ "$sched" != "minutely" ] && [ "$sched" != "hourly" ] && [ "$sched" != "daily" ] \
+     && [ "$sched" != "weekly" ] && [ "$sched" != "monthly" ] && [ "$sched" != "yearly" ]; then
+    if ! out="$(systemd-analyze calendar "$sched" 2>&1)"; then
+      say "  ${names[$i]}: '$sched' is not a calendar expression systemd understands"
+      say "      $(printf '%s' "$out" | head -1)"
+      problems=$((problems+1))
+      continue
+    fi
+    # Normalised form differing is fine; never firing is not.
+    if printf '%s' "$out" | grep -qi 'never'; then
+      say "  ${names[$i]}: '$sched' parses but never elapses"
+      problems=$((problems+1))
+    fi
+  fi
+  # The command's program must exist and be executable. A timer pointing at a
+  # path that is not there is another job that fails silently, once a day.
+  prog="${cmds[$i]%% *}"
+  case "$prog" in
+    /*) [ -x "$prog" ] || { say "  ${names[$i]}: $prog is missing or not executable"; problems=$((problems+1)); } ;;
+    *)  command -v "$prog" >/dev/null 2>&1 || { say "  ${names[$i]}: $prog is not on PATH"; problems=$((problems+1)); } ;;
+  esac
+done
+
+[ "$problems" -eq 0 ] || die "$problems problem(s) in $TABLE — nothing was written"
+say "$TABLE: ${#names[@]} jobs, all valid"
+[ "$MODE" = "--check" ] && exit 0
+
+# ------------------------------------------------------------------ write
+mkdir -p "$UNIT_DIR" || die "cannot write to $UNIT_DIR"
+for i in "${!names[@]}"; do
+  n="${PREFIX}${names[$i]}"
+  cat > "$UNIT_DIR/$n.service" <<EOF
+# Generated by install-timers.sh from $TABLE. Edit the table, not this file.
+[Unit]
+Description=${descs[$i]}
+
+[Service]
+Type=oneshot
+ExecStart=${cmds[$i]}
+# Bounded on purpose: a job that hangs should fail its unit and be visible in
+# \`systemctl --failed\`, not run until somebody happens to look.
+TimeoutStartSec=${TIMER_TIMEOUT:-1h}
+EOF
+  cat > "$UNIT_DIR/$n.timer" <<EOF
+# Generated by install-timers.sh from $TABLE. Edit the table, not this file.
+[Unit]
+Description=Schedule for ${descs[$i]}
+
+[Timer]
+OnCalendar=${scheds[$i]}
+$([ "${persists[$i]}" = "yes" ] && echo "Persistent=true")
+RandomizedDelaySec=${TIMER_JITTER:-0}
+
+[Install]
+WantedBy=timers.target
+EOF
+  say "  wrote $n.service and $n.timer"
+done
+
+"${SYSTEMCTL[@]}" daemon-reload 2>/dev/null || say "note: could not reload systemd — run daemon-reload yourself"
+for i in "${!names[@]}"; do
+  if "${SYSTEMCTL[@]}" enable --now "${PREFIX}${names[$i]}.timer" >/dev/null 2>&1; then
+    say "  enabled ${PREFIX}${names[$i]}.timer"
+  else
+    say "  NOTE: could not enable ${PREFIX}${names[$i]}.timer"
+  fi
+done
+say "done: ${#names[@]} timers"
