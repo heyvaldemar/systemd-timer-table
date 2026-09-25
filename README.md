@@ -1,6 +1,7 @@
 # systemd timer table
 
 [![Tests](https://github.com/heyvaldemar/systemd-timer-table/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/heyvaldemar/systemd-timer-table/actions/workflows/tests.yml)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14912/badge)](https://www.bestpractices.dev/projects/14912)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Every scheduled job on a host, in one table. The units are generated from it, and nothing is written until every line has been checked.
