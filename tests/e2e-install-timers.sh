@@ -123,8 +123,16 @@ fi
 # ------------------------------------------------- what it writes is valid
 # The generator can be right about the table and still emit something systemd
 # will not load, which would be a fine way to break every schedule at once.
-if systemd-analyze verify "$WORK/units/job-a.timer" 2>&1 | grep -viE 'Failed to (prepare|resolve)|not found' | grep -q .; then
-  fail "systemd rejects the generated timer: $(systemd-analyze verify "$WORK/units/job-a.timer" 2>&1 | head -2)"
+# Only what systemd says about these units counts. verify also loads the
+# host's own units on the way, and on ubuntu-26.04 the xfs_scrub slice the
+# image ships draws a warning about CPUAccounting=; a line that starts with a
+# path under the host's systemd directories is about a file this generator
+# never writes.
+verify_says="$(systemd-analyze verify "$WORK/units/job-a.timer" 2>&1 \
+  | grep -viE 'Failed to (prepare|resolve)|not found' \
+  | grep -vE '^/(usr/lib|lib|etc|run)/systemd/')"
+if [ -n "$verify_says" ]; then
+  fail "systemd rejects the generated timer: $(printf '%s\n' "$verify_says" | head -2)"
 else
   pass "systemd accepts the generated units"
 fi
